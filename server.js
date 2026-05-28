@@ -1,9 +1,17 @@
 const WebSocket = require("ws");
+const http      = require("http");
 
 const PORT = process.env.PORT || 8080;
-const wss = new WebSocket.Server({ port: PORT });
 
-let waiting = null; // holds one waiting player
+// ── HTTP server for health check (keeps Render awake) ──────
+const server = http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("Matchmaking server is running.");
+});
+
+const wss = new WebSocket.Server({ server });
+
+let waiting = null;
 
 wss.on("connection", (ws) => {
   console.log("Player connected");
@@ -16,36 +24,47 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("message", (data) => {
-    const msg = JSON.parse(data);
+    try {
+      const msg = JSON.parse(data);
 
-    if (msg.type === "search") {
-      if (waiting && waiting.readyState === WebSocket.OPEN) {
-        // Pair the two players
-        const host   = waiting;
-        const client = ws;
-        waiting = null;
-
-        // Tell host they are host
-        host.send(JSON.stringify({ type: "matched", role: "host" }));
-        // Tell client they are client
-        client.send(JSON.stringify({ type: "matched", role: "client" }));
-
-        console.log("Match found! Pairing two players.");
-      } else {
-        // No one waiting — this player waits
-        waiting = ws;
-        ws.send(JSON.stringify({ type: "waiting" }));
-        console.log("Player is waiting for partner...");
+      if (msg.type === "search") {
+        if (waiting && waiting.readyState === WebSocket.OPEN) {
+          const host   = waiting;
+          const client = ws;
+          waiting = null;
+          host.send(JSON.stringify({ type: "matched", role: "host" }));
+          client.send(JSON.stringify({ type: "matched", role: "client" }));
+          console.log("Match found! Pairing two players.");
+        } else {
+          waiting = ws;
+          ws.send(JSON.stringify({ type: "waiting" }));
+          console.log("Player is waiting for partner...");
+        }
       }
-    }
 
-    if (msg.type === "cancel") {
-      if (waiting === ws) {
-        waiting = null;
+      if (msg.type === "cancel") {
+        if (waiting === ws) {
+          waiting = null;
+        }
+        ws.send(JSON.stringify({ type: "cancelled" }));
       }
-      ws.send(JSON.stringify({ type: "cancelled" }));
+
+    } catch (e) {
+      console.error("Bad message:", e);
     }
   });
 });
 
-console.log("Matchmaking server running on port " + PORT);
+// ── Keep-alive ping every 10 minutes ───────────────────────
+setInterval(() => {
+  console.log("Server alive - " + new Date().toISOString());
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.ping();
+    }
+  });
+}, 600000);
+
+server.listen(PORT, () => {
+  console.log("Matchmaking server running on port " + PORT);
+});
